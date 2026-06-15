@@ -26,8 +26,25 @@ Function un.onInit
 	StrCpy $winSysDir "$WINDIR\SysWOW64"
 !endif
 
+	; Detect whether this was an all-users or a per-user installation, from the marker
+	; written at install time. A per-user install lives in HKCU, an all-users one in HKLM.
+	SetShellVarContext current
+!ifdef ARCH64 || ARCHARM64
+	${If} ${RunningX64}
+		SetRegView 64
+	${EndIf}
+!endif
+	ReadRegStr $0 HKCU "Software\${APPNAME}" "InstallMode"
+	${If} $0 == "CurrentUser"
+		StrCpy $MultiUserInstallMode "CurrentUser"
+	${Else}
+		StrCpy $MultiUserInstallMode "AllUsers"
+	${EndIf}
+
 	StrCpy $keepUserData "false"	; default value(It is must, otherwise few files such as shortcuts.xml, contextMenu.xml etc, will not be removed when $INSTDIR\doLocalConf.xml is not available.)
 	; determinate theme path for uninstall themes
+	; user config always lives in the current user's roaming %APPDATA%\Notepad++
+	SetShellVarContext current
 	StrCpy $installPath "$APPDATA\${APPNAME}"
 	StrCpy $doLocalConf "false"
 	IfFileExists $INSTDIR\doLocalConf.xml doesExist noneExist
@@ -37,6 +54,14 @@ doesExist:
 	StrCpy $doLocalConf "true"
 noneExist:
 	;MessageBox MB_OK "doLocalConf == $doLocalConf"
+
+	; From now on, use the shell-var context that matches the install mode
+	; (drives SHCTX registry access and all-users/current-user shortcut paths).
+	${If} $MultiUserInstallMode == "AllUsers"
+		SetShellVarContext all
+	${Else}
+		SetShellVarContext current
+	${EndIf}
 
 	Call un.setPathAndOptions
 FunctionEnd
@@ -74,8 +99,9 @@ Section un.explorerContextMenu
 	SetRegView 32
 !endif
 
-    DeleteRegKey HKCR "*\shell\ANotepad++64"
-    DeleteRegKey HKCR "CLSID\{B298D29A-A6ED-11DE-BA8C-A68E55D89593}"
+    ; SHCTX\Software\Classes == HKCR for all-users, HKCU\Software\Classes for per-user
+    DeleteRegKey SHCTX "Software\Classes\*\shell\ANotepad++64"
+    DeleteRegKey SHCTX "Software\Classes\CLSID\{B298D29A-A6ED-11DE-BA8C-A68E55D89593}"
 
     Delete "$INSTDIR\contextmenu\NppShell.dll"
     Delete "$INSTDIR\contextmenu\NppShell.msix"
@@ -199,23 +225,22 @@ Section Uninstall
 !else
 	SetRegView 32
 !endif
-	;Remove from registry...
-	DeleteRegKey HKLM "${UNINSTALL_REG_KEY}"
-	DeleteRegKey HKLM "SOFTWARE\${APPNAME}"
-	DeleteRegKey HKLM "SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\notepad++.exe"
+	;Remove from registry... (SHCTX follows the install mode set in un.onInit: HKLM all-users / HKCU per-user)
+	DeleteRegKey SHCTX "${UNINSTALL_REG_KEY}"
+	DeleteRegKey SHCTX "SOFTWARE\${APPNAME}"
+	DeleteRegKey SHCTX "SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\notepad++.exe"
 
 	; Delete self
 	Delete "$INSTDIR\uninstall.exe"
 
-	; Delete Shortcuts
+	; Delete Shortcuts (in the scope that matches the install mode)
 	Delete "$SMPROGRAMS\${APPNAME}\Uninstall.lnk"
 	RMDir "$SMPROGRAMS\${APPNAME}"
-	
-	UserInfo::GetAccountType
-	Pop $1
-	StrCmp $1 "Admin" 0 +2
+
+	${If} $MultiUserInstallMode == "AllUsers"
 		SetShellVarContext all ; make context for all user
-	
+	${EndIf}
+
 	Delete "$DESKTOP\Notepad++.lnk"
 	Delete "$SMPROGRAMS\Notepad++.lnk"
 	Delete "$SMPROGRAMS\${APPNAME}\Notepad++.lnk"
@@ -297,9 +322,10 @@ Section Uninstall
 		RMDir /r "$APPDATA\${APPNAME}\backup\"	; Remove backup folder recursively if not empty
 		RMDir "$APPDATA\${APPNAME}\themes\"	; has no effect as not empty at this moment, but it is taken care at un.onUninstSuccess
 		RMDir "$APPDATA\${APPNAME}"		; has no effect as not empty at this moment, but it is taken care at un.onUninstSuccess
-		
-		StrCmp $1 "Admin" 0 +2
-			SetShellVarContext all ; make context for all user
+
+		${If} $MultiUserInstallMode == "AllUsers"
+			SetShellVarContext all ; restore the all-users context for the remaining cleanup
+		${EndIf}
 	${endIf}
 	
 	; Remove remaining directories
