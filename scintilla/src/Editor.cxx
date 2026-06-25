@@ -75,6 +75,51 @@ using namespace Scintilla::Internal;
 
 namespace {
 
+// PoC (CJK full-width Tab alignment): East Asian Wide / Fullwidth code point
+// ranges, roughly following Unicode TR#11 / wcwidth. A full-width glyph occupies
+// two cells in a monospace font, but Scintilla's column model counts it as one,
+// so "Tab -> spaces" inserts one space too many after each wide character and the
+// following text drifts out of alignment. This table lets the space-count below
+// treat such characters as two columns wide. Heuristic and font-agnostic on
+// purpose - only meaningful for UTF-8 documents in a monospace font.
+constexpr bool IsWideForTabAlign(unsigned int ch) noexcept {
+	return
+		(ch >= 0x1100 && ch <= 0x115F) ||	// Hangul Jamo
+		(ch >= 0x2E80 && ch <= 0x303E) ||	// CJK Radicals, Kangxi, CJK Symbols & Punctuation
+		(ch >= 0x3041 && ch <= 0x33FF) ||	// Hiragana, Katakana ... CJK Compatibility
+		(ch >= 0x3400 && ch <= 0x4DBF) ||	// CJK Unified Ideographs Extension A
+		(ch >= 0x4E00 && ch <= 0x9FFF) ||	// CJK Unified Ideographs
+		(ch >= 0xA000 && ch <= 0xA4CF) ||	// Yi Syllables / Radicals
+		(ch >= 0xAC00 && ch <= 0xD7A3) ||	// Hangul Syllables
+		(ch >= 0xF900 && ch <= 0xFAFF) ||	// CJK Compatibility Ideographs
+		(ch >= 0xFE30 && ch <= 0xFE4F) ||	// CJK Compatibility Forms
+		(ch >= 0xFF00 && ch <= 0xFF60) ||	// Fullwidth Forms
+		(ch >= 0xFFE0 && ch <= 0xFFE6) ||	// Fullwidth Signs
+		(ch >= 0x20000 && ch <= 0x3FFFD);	// CJK Unified Ideographs Extension B and beyond
+}
+
+// Display column of a position, counting full-width characters as two cells.
+// Mirrors Document::GetColumn but is width-aware; used only to decide how many
+// spaces a Tab should insert so the result stays visually aligned (CJK PoC).
+Sci::Position DisplayColumnForTab(const Document *pdoc, Sci::Position pos) noexcept {
+	Sci::Position column = 0;
+	const Sci::Line line = pdoc->SciLineFromPosition(pos);
+	const int tabInChars = pdoc->tabInChars;
+	for (Sci::Position i = pdoc->LineStart(line); i < pos;) {
+		const CharacterExtracted ce = pdoc->CharacterAfter(i);
+		const unsigned int ch = ce.character;
+		if (ch == '\t') {
+			column = ((column / tabInChars) + 1) * tabInChars;
+		} else if (ch == '\r' || ch == '\n') {
+			break;
+		} else {
+			column += IsWideForTabAlign(ch) ? 2 : 1;
+		}
+		i += ce.widthBytes;
+	}
+	return column;
+}
+
 /*
 	return whether this modification represents an operation that
 	may reasonably be deferred (not done now OR [possibly] at all)
@@ -4231,7 +4276,10 @@ void Editor::Indent(bool forwards, bool lineIndent) {
 						const Sci::Position lengthInserted = pdoc->InsertString(caretPosition, "\t");
 						sel.Range(r) = SelectionRange(caretPosition + lengthInserted);
 					} else {
-						const Sci::Position numSpaces = pdoc->tabInChars - (column % pdoc->tabInChars);
+						// PoC: count full-width (CJK) characters as two columns so the
+						// inserted spaces keep the following text aligned (see DisplayColumnForTab).
+						const Sci::Position displayColumn = DisplayColumnForTab(pdoc, caretPosition);
+						const Sci::Position numSpaces = pdoc->tabInChars - (displayColumn % pdoc->tabInChars);
 						const std::string spaceText(numSpaces, ' ');
 						const Sci::Position lengthInserted = pdoc->InsertString(caretPosition, spaceText);
 						sel.Range(r) = SelectionRange(caretPosition + lengthInserted);
